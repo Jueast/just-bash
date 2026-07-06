@@ -100,6 +100,40 @@ describe("read builtin", () => {
       `);
       expect(result.stdout).toBe("got: line1\ngot: line2\ngot: line3\n");
     });
+
+    it("decodes UTF-8 pipeline input before assigning read variables", async () => {
+      const env = new Bash({
+        files: {
+          "/tmp/unicode/测试--路径.txt": "graph ok\n",
+        },
+      });
+
+      const result = await env.exec(`
+        find /tmp/unicode -type f | while read f; do
+          cat "$f"
+        done
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("graph ok\n");
+    });
+
+    it("preserves read offsets when UTF-8 lines are consumed", async () => {
+      const env = new Bash();
+
+      const result = await env.exec(`
+        printf '你好\\n世界\\n' | {
+          read a
+          read b
+          echo "$a/$b"
+        }
+      `);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("你好/世界\n");
+    });
   });
 
   describe("read -a with empty IFS", () => {

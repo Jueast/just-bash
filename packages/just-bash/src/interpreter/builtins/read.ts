@@ -2,6 +2,12 @@
  * read - Read a line of input builtin
  */
 
+import {
+  decodeBytesToUtf8,
+  encodeUtf8ToBytes,
+  latin1FromBytes,
+  unsafeBytesFromLatin1,
+} from "../../encoding.js";
 import type { ExecResult } from "../../types.js";
 import { clearArray } from "../helpers/array.js";
 import {
@@ -50,6 +56,17 @@ function encodeRwFdContent(
   content: string,
 ): string {
   return `__rw__:${path.length}:${path}:${position}:${content}`;
+}
+
+function rawOffsetForTextOffset(
+  text: string,
+  sourceIsByteString: boolean,
+  charsConsumed: number,
+): number {
+  if (!sourceIsByteString) return charsConsumed;
+
+  const consumedText = text.slice(0, charsConsumed);
+  return latin1FromBytes(encodeUtf8ToBytes(consumedText)).length;
 }
 
 export function handleRead(
@@ -264,19 +281,26 @@ export function handleRead(
   }
 
   // Use stdin from parameter, or fall back to groupStdin (for piped groups/while loops)
-  // If -u is specified, use the file descriptor content instead
-  let effectiveStdin = stdin;
+  // If -u is specified, use the file descriptor content instead.
+  let rawEffectiveStdin = stdin;
 
   if (fileDescriptor >= 0) {
     // Read from specified file descriptor
     if (ctx.state.fileDescriptors) {
-      effectiveStdin = ctx.state.fileDescriptors.get(fileDescriptor) || "";
+      rawEffectiveStdin = ctx.state.fileDescriptors.get(fileDescriptor) || "";
     } else {
-      effectiveStdin = "";
+      rawEffectiveStdin = "";
     }
-  } else if (!effectiveStdin && ctx.state.groupStdin !== undefined) {
-    effectiveStdin = ctx.state.groupStdin;
+  } else if (!rawEffectiveStdin && ctx.state.groupStdin !== undefined) {
+    rawEffectiveStdin = ctx.state.groupStdin;
   }
+
+  // read is text-consuming, but pipeline stdin is byte-shaped. Decode only
+  // for parsing/assignment; keep rawEffectiveStdin for consume bookkeeping.
+  const effectiveStdin = decodeBytesToUtf8(
+    unsafeBytesFromLatin1(rawEffectiveStdin),
+  );
+  const sourceIsByteString = effectiveStdin !== rawEffectiveStdin;
 
   // Handle -d '' (empty delimiter) - reads until NUL byte
   // Empty string delimiter means read until NUL byte (\0)
@@ -288,11 +312,17 @@ export function handleRead(
   let foundDelimiter = true; // Assume found unless no newline at end
 
   // Helper to consume from the appropriate source
-  const consumeInput = (bytesConsumed: number) => {
+  const consumeInput = (charsConsumed: number) => {
+    const sourceOffset = rawOffsetForTextOffset(
+      effectiveStdin,
+      sourceIsByteString,
+      charsConsumed,
+    );
+
     if (fileDescriptor >= 0 && ctx.state.fileDescriptors) {
       ctx.state.fileDescriptors.set(
         fileDescriptor,
-        effectiveStdin.substring(bytesConsumed),
+        rawEffectiveStdin.substring(sourceOffset),
       );
     } else if (stdinSourceFd >= 0 && ctx.state.fileDescriptors) {
       // Update the position of a read-write FD that was redirected to stdin
@@ -300,8 +330,8 @@ export function handleRead(
       if (fdContent?.startsWith("__rw__:")) {
         const parsed = parseRwFdContent(fdContent);
         if (parsed) {
-          // Advance position by bytesConsumed
-          const newPosition = parsed.position + bytesConsumed;
+          // Advance by the raw source offset, not the decoded character count.
+          const newPosition = parsed.position + sourceOffset;
           ctx.state.fileDescriptors.set(
             stdinSourceFd,
             encodeRwFdContent(parsed.path, newPosition, parsed.content),
@@ -309,7 +339,7 @@ export function handleRead(
         }
       }
     } else if (ctx.state.groupStdin !== undefined && !stdin) {
-      ctx.state.groupStdin = effectiveStdin.substring(bytesConsumed);
+      ctx.state.groupStdin = rawEffectiveStdin.substring(sourceOffset);
     }
   };
 
